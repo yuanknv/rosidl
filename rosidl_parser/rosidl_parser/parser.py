@@ -24,6 +24,7 @@ from typing import Literal
 from typing import Match
 from typing import Optional
 from typing import Pattern
+from typing import Tuple
 from typing import TYPE_CHECKING
 from typing import Union
 
@@ -78,20 +79,53 @@ if TYPE_CHECKING:
 
 AbstractTypeAlias = Union[AbstractNestableType, BasicType, BoundedSequence, UnboundedSequence]
 
+from rosidl_parser.serialization import load_ast_json
+from rosidl_parser.serialization import save_ast_json
+
 grammar_file = os.path.join(os.path.dirname(__file__), 'grammar.lark')
 with open(grammar_file, mode='r', encoding='utf-8') as h:
     grammar = h.read()
 
 _parser: Optional[Lark] = None
+_ast_cache: Dict[Tuple[str, Optional[float]], IdlContent] = {}
+
+
+def clear_ast_cache() -> None:
+    """Clear the in-memory AST cache."""
+    _ast_cache.clear()
 
 
 def parse_idl_file(locator: IdlLocator, png_file: Optional[str] = None) -> IdlFile:
-    string = locator.get_absolute_path().read_text(encoding='utf-8')
+    abs_path = locator.get_absolute_path()
+    try:
+        mtime = abs_path.stat().st_mtime
+    except OSError:
+        mtime = None
+
+    cache_key = (str(abs_path), mtime)
+    if cache_key in _ast_cache:
+        return IdlFile(locator, _ast_cache[cache_key])
+
+    # Check for pre-parsed AST JSON file alongside the IDL file
+    ast_json_path = abs_path.with_suffix(abs_path.suffix + '.json')
+    if ast_json_path.exists() and mtime is not None:
+        try:
+            if ast_json_path.stat().st_mtime >= mtime:
+                content = load_ast_json(ast_json_path)
+                _ast_cache[cache_key] = content
+                return IdlFile(locator, content)
+        except Exception:
+            pass
+
+    # Fall back to parsing the IDL text
+    string = abs_path.read_text(encoding='utf-8')
     try:
         content = parse_idl_string(string, png_file=png_file)
     except Exception as e:
-        print(str(e), str(locator.get_absolute_path()), file=sys.stderr)
+        print(str(e), str(abs_path), file=sys.stderr)
         raise
+
+    _ast_cache[cache_key] = content
     return IdlFile(locator, content)
 
 
